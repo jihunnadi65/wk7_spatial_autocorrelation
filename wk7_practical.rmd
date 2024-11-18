@@ -1,0 +1,50 @@
+Week 7 Spatial Autocorrelation
+
+Analysing spatial autocorrelation with Moran's I, LISA etc.
+
+```{r}
+library(here)
+library(janitor)
+library(sf)
+library(tidyverse)
+library(usethis)
+library(tmap)
+
+# read the ward data in
+Londonwards <- st_read(here::here("week7_practical_data", "London-wards-2018_ESRI", "London_ward.shp"))
+
+# inspect
+qtm(Londonwards)
+
+```
+
+```{r}
+LondonWardsMerged <- st_read(here::here("week7_practical_data", "statistical-gis-boundaries-london", "ESRI", "London_Ward_CityMerged.shp")) %>% 
+  st_transform(., 27700)
+
+#inspect
+qtm(LondonWardsMerged)
+```
+
+```{r}
+WardData <- read_csv("https://data.london.gov.uk/download/ward-profiles-and-atlas/772d2d64-e8c6-46cb-86f9-e52b4c7851bc/ward-profiles-excel-version.csv", locale = locale(encoding = "latin1"), na = c("NA", "n/a")) %>% 
+  clean_names()
+
+LondonWardsMerged <- LondonWardsMerged %>% left_join(WardData, by = c("GSS_CODE" = "new_code")) %>% 
+  dplyr::distinct(GSS_CODE, .keep_all = T) %>% 
+  dplyr::select(GSS_CODE, ward_name, average_gcse_capped_point_scores_2014)
+
+View(LondonWardsMerged)
+```
+
+```{r}
+# have a look at the crs to check if correct
+st_crs(LondonWardsMerged)
+```
+
+```{r}
+BluePlaques <- st_read(here::here("week7_practical_data", "open-plaques-london-2018-04-08.geojson")) %>% 
+  st_transform(., 27700)
+
+```
+
