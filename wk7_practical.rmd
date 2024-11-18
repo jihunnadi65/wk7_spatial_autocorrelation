@@ -48,3 +48,225 @@ BluePlaques <- st_read(here::here("week7_practical_data", "open-plaques-london-2
 
 ```
 
+```{r}
+tmap_mode("plot")
+tm_shape(LondonWardsMerged) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaques) +
+  tm_dots(col = "blue")
+```
+
+Data Cleaning
+
+```{r}
+summary(BluePlaques)
+```
+
+Need to lose the blue plaques that fall outisde of London
+
+```{r}
+BluePlaquesSub <- BluePlaques[LondonWardsMerged,]
+
+tm_shape(LondonWardsMerged) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(BluePlaquesSub) +
+  tm_dots(col = "blue")
+```
+
+Data Manipulation
+
+Take the length of each list per polygon and add this as a new column
+
+```{r}
+points_sf_joined <- LondonWardsMerged %>% 
+  mutate(n = lengths(st_intersects(., BluePlaquesSub))) %>% 
+           janitor::clean_names() %>% 
+           # calculate area
+           mutate(area = st_area(.)) %>% 
+           # then density of the points per ward
+           mutate(density = n / area) %>% 
+           # select density and some other variables
+           dplyr::select(gss_code, ward_name, n, density, average_gcse_capped_point_scores_2014)
+
+# inspect
+View(points_sf_joined)
+```
+
+```{r}
+# quick choropleth map to check how we are getting on
+points_sf_joined <- points_sf_joined %>% 
+  group_by(gss_code) %>% 
+  summarise(density = first(density),
+            wardname = first(ward_name),
+            plaquecount = first(n))
+
+View(points_sf_joined)
+
+tm_shape(points_sf_joined) +
+  tm_polygons("density",
+              style = "jenks",
+              palette = "PuOr",
+              midpoint = NA,
+              popup.vars = c("wardname", "density"),
+              title = "Blue Plaque Density")
+```
+
+```{r}
+library(spdep)
+```
+
+```{r}
+# first calculate the centroids of all wards in London
+coordsW <- points_sf_joined %>% 
+  st_centroid() %>% 
+  st_geometry()
+
+plot(coordsW, axes = TRUE)
+```
+
+Now we need to generate a spatial weights matrix
+
+```{r}
+# create a neighbours list
+LWard_nb <- points_sf_joined %>% 
+  poly2nb(., queen = T)
+
+# inspect
+summary(LWard_nb)
+```
+
+```{r}
+# plot
+plot(LWard_nb, st_geometry(coordsW), col = "red")
+# add a map underneath
+plot(points_sf_joined$geometry, add = T)
+```
+
+```{r}
+# create a spatial weights matrix from these weights. B means binary here
+Lward.lw <- LWard_nb %>% 
+  nb2mat(., style="B")
+
+# we have 3,680 neighbours
+sum(Lward.lw)
+```
+
+```{r}
+# Moran's I requires a spatial weight list type object as opposed to matrix
+Lward.lw <- LWard_nb %>% 
+  nb2listw(., style = "C")
+```
+
+Moran's I test tells us whether we have clustered values (close to 1) or dispersed values (close to -1).
+
+We will calculate for the densities rather than raw values (Why? - raw number depends greatly on ward size and population etc. Density matters more to compare wards amongst one another)
+
+```{r}
+I_LWard_Global_Density <- points_sf_joined %>% 
+  pull(density) %>% 
+  as.vector() %>% 
+  moran.test(., Lward.lw)
+
+I_LWard_Global_Density
+```
+
+Geary's C tells us whether similar values or dissimilar values are clustering
+
+```{r}
+C_LWard_Global_Density <- 
+  points_sf_joined %>% 
+  pull(density) %>% 
+  as.vector() %>% 
+  geary.test(., Lward.lw)
+
+C_LWard_Global_Density
+```
+
+Getis Ord General G tells us whether high or low values are clustering. G > Expected = high values clustering vs G < Expected = low values clustering
+
+```{r}
+G_LWard_Global_Density <- 
+  points_sf_joined %>% 
+  pull(density) %>% 
+  as.vector() %>% 
+  globalG.test(., Lward.lw)
+
+G_LWard_Global_Density
+```
+
+Moran's I statistic = 0.67 meaning we have some distinctive clustering
+
+Geary's C statistic = 0.41 meaning that similar values are clustering
+
+General G statistic = G > Expected, so high values are tending to cluster
+
+Local Moran's I
+
+```{r}
+# use the localmoran function to generate I for each ward in the city
+
+colnames(points_sf_joined)
+
+I_LWard_Local_count <- points_joined_summary %>% 
+  pull(plaquecount) %>% 
+  as.vector() %>% 
+  localmoran(., Lward.lw) %>% 
+  as_tibble()
+
+I_LWard_Local_Density <- points_joined_summary %>% 
+  pull(density) %>% 
+  as.vector() %>% 
+  localmoran(., Lward.lw) %>% 
+  as_tibble()
+
+# what does that output look like?
+slice_head(I_LWard_Local_Density, n=10)
+```
+
+We want to copy some of the columns (the I score and the z-score standard deviation column back into the LondonWards spatialPolygonsDataframe)
+
+```{r}
+points_sf_joined <- points_sf_joined %>% 
+  mutate(plaque_count_I = as.numeric(I_LWard_Local_count$Ii)) %>% 
+  mutate(plaque_count_Iz = as.numeric(I_LWard_Local_count$Z.Ii)) %>% 
+  mutate(density_I = as.numeric(I_LWard_Local_Density$Ii)) %>% 
+  mutate(density_Iz = as.numeric(I_LWard_Local_Density$Z.Ii))
+```
+
+Mapping
+
+We'll set the breaks manually based on the rule that data points >2.58 or <-2.58 standard deviations away from the mean are significant at the 99% level (<1% chance that autocorrelation is not present)
+
+```{r}
+breaks1 <- c(-1000, -2.58, -1.96, -1.65, 1.65, 1.96, 2.58, 1000)
+```
+
+rev() function makes the higher values correspond to red
+
+```{r}
+library(RColorBrewer)
+MoranColours <- rev(brewer.pal(8, "RdGy"))
+
+View(points_sf_joined)
+```
+
+Plot an interactive map
+
+```{r}
+tm_shape(points_sf_joined) +
+  tm_polygons("plaque_count_Iz",
+              style = "fixed",
+              breaks = breaks1,
+              palette = MoranColours,
+              midpoint = NA,
+              title = "Local Moran's I, Blue Plaques in London")
+```
+
+Local Getis Ord G
+
+The result of Getis Ord G analysis is an array of Z-scores, one for each pixel [or polygon], which is the number of standard deviations that the pixel [or polygon] and its neighbors are from the global mean. High Z-scores indicate more intense clustering of high pixel values, indicating hot spots. Low Z-scores indicate more intense clustering of low values, indicating cold spots. Individual pixels with high or low values by themselves might be interesting but not necessarily significant.
+
+```{r}
+
+```
+
